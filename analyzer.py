@@ -606,8 +606,8 @@ class JavaScriptAnalyzer:
             return params
 
         # Hard limits to prevent "stuck" on huge bundles
-        MAX_TOTAL_FINDINGS = 3000
-        MAX_MATCHES_PER_PATTERN = 1200
+        MAX_TOTAL_FINDINGS = 100 #3000
+        MAX_MATCHES_PER_PATTERN = 50 #1200
         MAX_CONTENT_FOR_FULL_SCAN = 2_500_000  # ~2.5MB, adjust as you want
 
         # Quick minified detection without heavy splitting
