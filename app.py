@@ -39,6 +39,7 @@ def analyze():
     - Pattern matching and analysis happens server-side
     - Only results are sent back to the browser
     """
+    print(f"\x1b[1;92m[>] Received analysis request")
     try:
         if request.is_json:
             data = request.get_json()
@@ -46,6 +47,7 @@ def analyze():
                 return jsonify({'error': 'Invalid JSON in request body'}), 400
             
             urls = data.get('urls', [])
+
             if isinstance(urls, str):
                 urls = [urls]
             
@@ -56,6 +58,7 @@ def analyze():
             
             if not urls:
                 return jsonify({'error': 'URL(s) are required'}), 400
+            print(f"\x1b[1;93m[>] Total URLs to analyze: {len(urls)}")
         else:
             # Handle file upload
             if 'file' in request.files:
@@ -88,6 +91,7 @@ def analyze():
             
             try:
                 # Server-side analysis: fetch file, run patterns, extract findings
+                print(f"\x1b[1;95m[>] Analyzing : {idx + 1}/{len(urls)}: {url}")
                 result = analyzer.analyze(url)
                 result_dict = {
                     'file_id': idx + 1,
@@ -105,6 +109,22 @@ def analyze():
                     'file_size': result.file_size,
                     'analysis_timestamp': result.analysis_timestamp,
                 }
+                # result_dict = {
+                #     'file_id': idx + 1,
+                #     'url': result.url,
+                #     'api_keys': result.api_keys or [],
+                #     'credentials': result.credentials or [],
+                #     'emails': result.emails or [],
+                #     'interesting_comments': result.interesting_comments or [],
+                #     'xss_vulnerabilities': result.xss_vulnerabilities or [],
+                #     'xss_functions': result.xss_functions or [],
+                #     'api_endpoints': result.api_endpoints or [],
+                #     'parameters': result.parameters or [],
+                #     'paths_directories': result.paths_directories or [],
+                #     'errors': result.errors or [],
+                #     'file_size': result.file_size,
+                #     'analysis_timestamp': result.analysis_timestamp,
+                # }
                 results.append(result_dict)
                 analysis_results[session_id]['files'].append(result_dict)
                 analysis_results[session_id]['completed'] += 1

@@ -1,9 +1,18 @@
 import re
 import requests
-from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, asdict
 from datetime import datetime
 import urllib3
+from typing import List, Dict, Any, Optional, Tuple
+import re
+import bisect
+
+
+def _clip(s: Optional[str], n: int) -> Optional[str]:
+    if s is None:
+        return None
+    s = str(s)
+    return s if len(s) <= n else s[:n]
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -32,40 +41,88 @@ class JavaScriptAnalyzer:
     def __init__(self):
         # Improved API key patterns - more specific to reduce false positives
         self.api_key_patterns = [
-            # AWS - very specific
-            (r'AKIA[0-9A-Z]{16}', 'AWS Access Key ID', True),
-            (r'(?i)(aws[_-]?secret[_-]?access[_-]?key|aws[_-]?secret)\s*[:=]\s*["\']([a-zA-Z0-9/+=]{40})["\']', 'AWS Secret Key', True),
-            
-            # Google API - specific format
-            (r'AIza[0-9A-Za-z\-]{35}', 'Google API Key', True),
-            (r'(?i)google[_-]?api[_-]?key\s*[:=]\s*["\'](AIza[0-9A-Za-z\-]{35})["\']', 'Google API Key', True),
-            
-            # GitHub tokens - specific prefixes
-            (r'ghp_[a-zA-Z0-9]{36}', 'GitHub Personal Access Token', True),
-            (r'github_pat_[a-zA-Z0-9]{22}_[a-zA-Z0-9]{59}', 'GitHub Fine-grained Token', True),
-            
-            # Stripe - specific prefixes
-            (r'sk_live_[a-zA-Z0-9]{24,}', 'Stripe Live Secret Key', True),
-            (r'sk_test_[a-zA-Z0-9]{24,}', 'Stripe Test Secret Key', True),
-            (r'pk_live_[a-zA-Z0-9]{24,}', 'Stripe Live Publishable Key', True),
-            (r'pk_test_[a-zA-Z0-9]{24,}', 'Stripe Test Publishable Key', True),
-            
-            # PayPal
-            (r'access_token\$production\$[a-zA-Z0-9]{22}\$[a-zA-Z0-9]{86}', 'PayPal Access Token', True),
-            
-            # Slack
-            (r'xox[baprs]-[0-9a-zA-Z\-]{10,48}', 'Slack Token', True),
-            
-            # Firebase
-            (r'AAAA[A-Za-z0-9_-]{7}:[A-Za-z0-9_-]{140}', 'Firebase Cloud Messaging Token', True),
-            
-            # JWT - but filter out common false positives
-            (r'\beyJ[A-Za-z0-9-_=]+\.eyJ[A-Za-z0-9-_=]+\.?[A-Za-z0-9-_.+/=]{10,}\b', 'JWT Token', False),
-            
-            # Generic - only if it looks like a real key (not just variable names)
-            (r'(?i)(api[_-]?key|apikey)\s*[:=]\s*["\']([a-zA-Z0-9_\-]{32,})["\']', 'Generic API Key', False),
-            (r'(?i)(secret[_-]?key|secret)\s*[:=]\s*["\']([a-zA-Z0-9_\-/+=]{32,})["\']', 'Secret Key', False),
-        ]
+                # -------------------------
+                # AWS
+                # -------------------------
+                (r'AKIA[0-9A-Z]{16}', 'AWS Access Key ID', True),
+                (r'ASIA[0-9A-Z]{16}', 'AWS Temporary Access Key', True),
+                (r'(?i)aws(.{0,20})?(secret|private).{0,20}?["\']([A-Za-z0-9/+=]{40})["\']', 'AWS Secret Key', True),
+
+                # -------------------------
+                # Google / GCP
+                # -------------------------
+                (r'AIza[0-9A-Za-z\-_]{35}', 'Google API Key', True),
+                (r'(?i)google(.{0,20})?api(.{0,20})?key["\']?\s*[:=]\s*["\'](AIza[0-9A-Za-z\-_]{35})', 'Google API Key', True),
+
+                # -------------------------
+                # GitHub
+                # -------------------------
+                (r'ghp_[A-Za-z0-9]{36}', 'GitHub PAT', True),
+                (r'github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}', 'GitHub Fine-grained Token', True),
+                (r'gho_[A-Za-z0-9]{36}', 'GitHub OAuth Token', True),
+
+                # -------------------------
+                # GitLab
+                # -------------------------
+                (r'glpat-[A-Za-z0-9\-_]{20,}', 'GitLab Access Token', True),
+
+                # -------------------------
+                # Stripe
+                # -------------------------
+                (r'sk_live_[A-Za-z0-9]{24,}', 'Stripe Live Secret Key', True),
+                (r'sk_test_[A-Za-z0-9]{24,}', 'Stripe Test Secret Key', True),
+                (r'pk_live_[A-Za-z0-9]{24,}', 'Stripe Live Publishable Key', True),
+                (r'pk_test_[A-Za-z0-9]{24,}', 'Stripe Test Publishable Key', True),
+
+                # -------------------------
+                # PayPal
+                # -------------------------
+                (r'access_token\$production\$[A-Za-z0-9]{22}\$[A-Za-z0-9]{86}', 'PayPal Access Token', True),
+
+                # -------------------------
+                # Slack
+                # -------------------------
+                (r'xox[baprs]-[0-9A-Za-z\-]{10,48}', 'Slack Token', True),
+
+                # -------------------------
+                # Firebase
+                # -------------------------
+                (r'AAAA[A-Za-z0-9_-]{7}:[A-Za-z0-9_-]{140}', 'Firebase Cloud Messaging Token', True),
+                (r'(?i)firebase(.{0,20})?(api|server)?(.{0,20})?key["\']?\s*[:=]\s*["\']([A-Za-z0-9_-]{32,})', 'Firebase API Key', False),
+
+                # -------------------------
+                # JWT
+                # -------------------------
+                (r'\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b', 'JWT Token', False),
+
+                # -------------------------
+                # OAuth / Bearer tokens
+                # -------------------------
+                (r'Bearer\s+[A-Za-z0-9\-_\.=]{30,}', 'Bearer Token', False),
+
+                # -------------------------
+                # Private keys
+                # -------------------------
+                (r'-----BEGIN (RSA|DSA|EC|OPENSSH|PRIVATE) KEY-----', 'Private Key', True),
+
+                # -------------------------
+                # High-entropy generic secrets
+                # -------------------------
+                (r'(?i)(api|access|secret|private|token|auth)[_-]?(key|token|secret)?\s*[:=]\s*["\']([A-Za-z0-9_\-\/+=]{32,})["\']', 'Generic Secret', False),
+
+                # -------------------------
+                # Hex secrets (often used in crypto, sessions)
+                # -------------------------
+                (r'\b[a-f0-9]{32}\b', 'MD5-like Secret', False),
+                (r'\b[a-f0-9]{40}\b', 'SHA1-like Secret', False),
+                (r'\b[a-f0-9]{64}\b', 'SHA256-like Secret', False),
+
+                # -------------------------
+                # Base64 secrets
+                # -------------------------
+                (r'\b[A-Za-z0-9+/]{40,}={0,2}\b', 'Base64 Encoded Secret', False),
+            ]
+
         
         # Credentials - more specific
         self.credential_patterns = [
@@ -111,19 +168,81 @@ class JavaScriptAnalyzer:
         
         # API patterns
         self.api_patterns = [
+            # --------------------
+            # fetch()
+            # --------------------
             (r'fetch\s*\(\s*["\']([^"\']+)["\']', 'fetch()'),
-            (r'fetch\s*\(\s*`([^`]+)`', 'fetch() (template)'),
-            (r'\.open\s*\(\s*["\'](GET|POST|PUT|DELETE|PATCH)["\']\s*,\s*["\']([^"\']+)["\']', 'XMLHttpRequest'),
-            (r'axios\.(get|post|put|delete|patch)\s*\(\s*["\']([^"\']+)["\']', 'axios'),
-            (r'axios\s*\(\s*\{[^}]*url\s*:\s*["\']([^"\']+)["\']', 'axios (config)'),
+            (r'fetch\s*\(\s*`([^`]+)`', 'fetch() template'),
+            (r'fetch\s*\(\s*([a-zA-Z_$][\w$]*)', 'fetch() variable'),
+
+            # --------------------
+            # XMLHttpRequest
+            # --------------------
+            (r'\.open\s*\(\s*["\'](GET|POST|PUT|DELETE|PATCH|OPTIONS)["\']\s*,\s*["\']([^"\']+)["\']', 'XMLHttpRequest'),
+            (r'\.open\s*\(\s*["\'](GET|POST|PUT|DELETE|PATCH|OPTIONS)["\']\s*,\s*([a-zA-Z_$][\w$]*)', 'XMLHttpRequest variable'),
+
+            # --------------------
+            # Axios
+            # --------------------
+            (r'axios\.(get|post|put|delete|patch|options)\s*\(\s*["\']([^"\']+)["\']', 'axios'),
+            (r'axios\.(get|post|put|delete|patch|options)\s*\(\s*`([^`]+)`', 'axios template'),
+            (r'axios\s*\(\s*\{[^}]*url\s*:\s*["\']([^"\']+)["\']', 'axios config'),
+            (r'axios\s*\(\s*\{[^}]*url\s*:\s*`([^`]+)`', 'axios config template'),
+
+            # --------------------
+            # jQuery AJAX
+            # --------------------
             (r'\$\.(ajax|get|post|getJSON)\s*\(\s*\{[^}]*url\s*:\s*["\']([^"\']+)["\']', 'jQuery AJAX'),
-            (r'\$\.(ajax|get|post)\s*\(\s*["\']([^"\']+)["\']', 'jQuery AJAX (short)'),
-            (r'\$\.getJSON\s*\(\s*["\']([^"\']+)["\']', 'jQuery getJSON'),
+            (r'\$\.(ajax|get|post|getJSON)\s*\(\s*\{[^}]*url\s*:\s*`([^`]+)`', 'jQuery AJAX template'),
+            (r'\$\.(get|post|getJSON)\s*\(\s*["\']([^"\']+)["\']', 'jQuery AJAX short'),
+
+            # --------------------
+            # Superagent
+            # --------------------
+            (r'superagent\.(get|post|put|delete|patch)\s*\(\s*["\']([^"\']+)["\']', 'superagent'),
+
+            # --------------------
+            # GraphQL
+            # --------------------
+            (r'["\'](/graphql[^"\']*)["\']', 'GraphQL Endpoint'),
+            (r'graphqlEndpoint\s*[:=]\s*["\']([^"\']+)["\']', 'GraphQL Endpoint Var'),
+
+            # --------------------
+            # WebSocket
+            # --------------------
+            (r'new\s+WebSocket\s*\(\s*["\'](ws[s]?:\/\/[^"\']+)["\']', 'WebSocket URL'),
+
+            # --------------------
+            # EventSource (SSE)
+            # --------------------
+            (r'new\s+EventSource\s*\(\s*["\']([^"\']+)["\']', 'EventSource URL'),
+
+            # --------------------
+            # Absolute URLs
+            # --------------------
+            (r'["\'](https?:\/\/[^"\']+)["\']', 'Absolute URL'),
+
+            # --------------------
+            # API paths (relative)
+            # --------------------
             (r'["\'](/api/[^"\']+)["\']', 'API Path'),
-            (r'["\'](/v\d+/[^"\']+)["\']', 'API Versioned Path'),
+            (r'["\'](/v\d+/[^"\']+)["\']', 'Versioned API Path'),
+            (r'["\'](/internal/[^"\']+)["\']', 'Internal API Path'),
+            (r'["\'](/admin/[^"\']+)["\']', 'Admin Path'),
+
+            # --------------------
+            # Base URLs / config
+            # --------------------
             (r'baseURL\s*[:=]\s*["\']([^"\']+)["\']', 'Base URL'),
             (r'api[_-]?url\s*[:=]\s*["\']([^"\']+)["\']', 'API URL Variable'),
+            (r'endpoint\s*[:=]\s*["\']([^"\']+)["\']', 'Endpoint Variable'),
+
+            # --------------------
+            # Environment-based URLs
+            # --------------------
+            (r'process\.env\.[A-Z0-9_]+', 'Environment URL'),
         ]
+
         
         # Parameter patterns - comprehensive detection of ALL parameters
         self.parameter_patterns = [
@@ -298,79 +417,108 @@ class JavaScriptAnalyzer:
         
         return False
     
-    def find_patterns(self, content: str, patterns: List[tuple], context_lines: int = 5) -> List[Dict[str, Any]]:
-        """Find patterns with context and false positive filtering"""
+    def find_patterns(self, content: str, patterns: list, context_lines: int = 5) -> list:
         findings = []
         if not content:
             return findings
-        
-        # Handle minified files (single line) - limit context
+
         lines = content.split('\n')
-        if len(lines) == 1 and len(content) > 10000:
-            # Very long single line - likely minified, reduce context
+        is_minified = (len(lines) == 1 and len(content) > 10000)
+
+        if is_minified:
             context_lines = 0
-        
+
+        seen = set()
+
         for pattern_info in patterns:
             try:
-                if len(pattern_info) == 3:
-                    pattern, label, is_strict = pattern_info
-                else:
-                    pattern, label = pattern_info[:2]
-                    is_strict = False
-                
-                matches = re.finditer(pattern, content, re.MULTILINE | re.IGNORECASE)
-                for match in matches:
+                pattern = pattern_info[0]
+                label = pattern_info[1]
+                is_strict = False
+                severity = None
+
+                if len(pattern_info) >= 3 and isinstance(pattern_info[2], bool):
+                    is_strict = pattern_info[2]
+                if len(pattern_info) >= 4 and isinstance(pattern_info[3], str):
+                    severity = pattern_info[3]
+                if len(pattern_info) == 3 and isinstance(pattern_info[2], str):
+                    severity = pattern_info[2]
+
+                for match in re.finditer(pattern, content, re.MULTILINE | re.IGNORECASE):
                     try:
-                        match_text = match.group(0)
-                        
-                        # Filter false positives
-                        if not is_strict and self.is_false_positive(match_text, label):
+                        full_match = match.group(0)
+
+                        # Prefer captured secret value if exists
+                        extracted = full_match
+                        if match.lastindex:
+                            for i in range(match.lastindex, 0, -1):
+                                g = match.group(i)
+                                if g and isinstance(g, str):
+                                    extracted = g
+                                    break
+
+                        extracted = extracted.strip(' "\'')
+
+                        # False positive filtering
+                        if not is_strict and self.is_false_positive(full_match, label):
                             continue
-                        
+
                         start_pos = match.start()
                         line_num = content[:start_pos].count('\n') + 1
-                        
-                        # Get context with more lines
-                        start_line = max(0, line_num - context_lines - 1)
-                        end_line = min(len(lines), line_num + context_lines)
-                        context_lines_list = lines[start_line:end_line]
-                        context = '\n'.join(context_lines_list)
-                        
-                        # For very long lines (minified), truncate context
-                        if len(context) > 1000:
-                            # Show snippet around the match position
-                            match_start_in_line = start_pos - content[:start_pos].rfind('\n', max(0, start_pos - 500), start_pos)
-                            context_start = max(0, match_start_in_line - 200)
-                            context_end = min(len(context), match_start_in_line + len(match_text) + 200)
-                            context = context[context_start:context_end]
-                        
-                        # Get exact code snippet
-                        line_content = lines[line_num - 1] if line_num <= len(lines) else ""
-                        # Truncate very long lines
-                        if len(line_content) > 500:
-                            line_content = line_content[:200] + "..." + line_content[-200:]
-                        
+
+                        # Line content
+                        line_text = lines[line_num - 1] if line_num <= len(lines) else ""
+                        if len(line_text) > 500:
+                            line_text = line_text[:220] + "..." + line_text[-220:]
+
+                        # Context handling
+                        if is_minified:
+                            cs = max(0, start_pos - 250)
+                            ce = min(len(content), match.end() + 250)
+                            context = content[cs:ce]
+                            ctx_start = line_num
+                            ctx_end = line_num
+                        else:
+                            start_line = max(0, line_num - context_lines - 1)
+                            end_line = min(len(lines), line_num + context_lines)
+                            context = '\n'.join(lines[start_line:end_line])
+                            ctx_start = start_line + 1
+                            ctx_end = end_line
+
+                        if len(context) > 1200:
+                            mid = len(context) // 2
+                            context = context[mid - 400: mid + 400]
+
+                        match_preview = full_match[:220]
+
+                        dedup_key = (label, line_num, match_preview)
+                        if dedup_key in seen:
+                            continue
+                        seen.add(dedup_key)
+
                         finding = {
-                            'type': str(label),
-                            'match': str(match_text[:200]),
-                            'line': int(line_num),
-                            'line_content': str(line_content.strip()),
-                            'context': str(context),
-                            'context_start_line': int(start_line + 1),
-                            'context_end_line': int(end_line),
+                            "type": str(label),
+                            "match": match_preview,
+                            "extracted": extracted[:220],
+                            "line": line_num,
+                            "line_content": line_text.strip(),
+                            "context": context,
+                            "context_start_line": ctx_start,
+                            "context_end_line": ctx_end,
+                            "strict": is_strict,
                         }
-                        
-                        if len(pattern_info) > 2 and isinstance(pattern_info[2], str):
-                            finding['severity'] = str(pattern_info[2])
-                        
+
+                        if severity:
+                            finding["severity"] = severity
+
                         findings.append(finding)
-                    except Exception as e:
-                        # Skip problematic matches
+
+                    except Exception:
                         continue
-            except Exception as e:
-                # Skip problematic patterns
+
+            except Exception:
                 continue
-        
+
         return findings
     
     def extract_api_endpoints(self, content: str) -> List[Dict[str, Any]]:
@@ -413,137 +561,250 @@ class JavaScriptAnalyzer:
         
         return unique_endpoints
     
+    def _build_line_index(self, content: str):
+            # positions of each '\n' for fast line lookup
+            nl = [i for i, ch in enumerate(content) if ch == "\n"]
+            lines = content.splitlines()
+            return nl, lines
+
+    def _pos_to_line(self, nl_positions: List[int], pos: int) -> int:
+        # 1-based line number
+        return bisect.bisect_left(nl_positions, pos) + 1
+
+    def _parse_query_params(self, param_part: str) -> List[Tuple[str, str]]:
+        # param_part may include leading ? or & and may contain multiple params
+        # Example: "?a=1&b=2" or "a=1&b=2"
+        out = []
+        if not param_part:
+            return out
+
+        # remove leading ?, & safely
+        param_part = param_part.lstrip("?&").strip()
+        if not param_part:
+            return out
+
+        # split multiple params
+        for chunk in param_part.split("&"):
+            if not chunk or "=" not in chunk:
+                continue
+            k, v = chunk.split("=", 1)
+            k = k.strip().lstrip("?&")
+            v = v.strip()
+            if k:
+                out.append((k, v))
+        return out
+
+    def _snippet_context(self, content: str, start_pos: int, full_match_len: int, radius: int = 200) -> str:
+        a = max(0, start_pos - radius)
+        b = min(len(content), start_pos + full_match_len + radius)
+        return content[a:b]
+
     def extract_parameters(self, content: str) -> List[Dict[str, Any]]:
-        """Extract parameters from JavaScript including URL query parameters"""
-        params = []
+        """Extract parameters from JavaScript including URL query parameters (smooth + safer)."""
+        params: List[Dict[str, Any]] = []
         if not content:
             return params
-        
-        lines = content.split('\n')
-        
-        for pattern, label in self.parameter_patterns:
+
+        # Hard limits to prevent "stuck" on huge bundles
+        MAX_TOTAL_FINDINGS = 3000
+        MAX_MATCHES_PER_PATTERN = 1200
+        MAX_CONTENT_FOR_FULL_SCAN = 2_500_000  # ~2.5MB, adjust as you want
+
+        # Quick minified detection without heavy splitting
+        is_probably_minified = ("\n" not in content and len(content) > 10000)
+
+        # Build line index only when helpful
+        if is_probably_minified or len(content) > MAX_CONTENT_FOR_FULL_SCAN:
+            nl_positions = []
+            lines = [content]  # keep minimal, line_num will be 1
+        else:
+            nl_positions, lines = self._build_line_index(content)
+
+        # Compile patterns once
+        compiled = []
+        for item in self.parameter_patterns:
+            if len(item) == 2:
+                pattern, label = item
+                kind = None
+            else:
+                pattern, label, kind = item[0], item[1], item[2]
             try:
-                matches = re.finditer(pattern, content, re.MULTILINE | re.IGNORECASE)
-                for match in matches:
-                    try:
-                        start_pos = match.start()
-                        line_num = content[:start_pos].count('\n') + 1
-                        
-                        # Extract parameter information
-                        full_match = match.group(0)
-                        param_text = full_match
-                        
-                        # Try to extract parameter name and value
-                        param_name = None
-                        param_value = None
-                        
-                        if len(match.groups()) >= 1:
-                            # For URL query parameters like ?key=value or &email=test
-                            if '?' in full_match or '&' in full_match:
-                                # Extract the parameter part
-                                param_part = match.group(1) if match.lastindex >= 1 else full_match
-                                if '=' in param_part:
-                                    # Handle multiple parameters: param1=val1&param2=val2
-                                    if '&' in param_part:
-                                        # Extract first parameter for display
-                                        first_param = param_part.split('&')[0]
-                                        if '=' in first_param:
-                                            parts = first_param.split('=', 1)
-                                            if len(parts) == 2:
-                                                param_name = parts[0].lstrip('?&').strip()
-                                                param_value = parts[1].strip()
-                                                param_text = f"{param_name}={param_value[:50]}..."
-                                    else:
-                                        parts = param_part.split('=', 1)
-                                        if len(parts) == 2:
-                                            # Remove ? or & from param name
-                                            param_name = parts[0].lstrip('?&').strip()
-                                            param_value = parts[1].strip()
-                                            param_text = f"{param_name}={param_value[:50]}"
-                            # For function parameters
-                            elif '(' in full_match and ')' in full_match:
-                                # Extract parameters from function definition
-                                param_text = match.group(2) if len(match.groups()) > 1 and match.lastindex >= 2 else (match.group(1) if match.lastindex >= 1 else full_match)
-                                # Try to extract first parameter name
-                                params_str = param_text.split(',')[0] if ',' in param_text else param_text
-                                if '=' in params_str:
-                                    # Default parameter value
-                                    param_name = params_str.split('=')[0].strip()
-                                elif ':' in params_str:
-                                    # Type annotation or object property
-                                    param_name = params_str.split(':')[0].strip()
-                                else:
-                                    param_name = params_str.strip()
-                            # For object/destructuring parameters
-                            elif '{' in full_match:
-                                param_text = match.group(1) if match.lastindex >= 1 else full_match
-                                # Extract first property name
-                                if ':' in param_text:
-                                    param_name = param_text.split(':')[0].strip()
-                                else:
-                                    param_name = param_text.split(',')[0].strip() if ',' in param_text else param_text.strip()
-                            else:
-                                param_text = match.group(1) if match.lastindex >= 1 else (match.group(2) if len(match.groups()) > 1 and match.lastindex >= 2 else full_match)
-                                # Try to extract parameter name from various patterns
-                                if '=' in param_text:
-                                    param_name = param_text.split('=')[0].strip()
-                                elif ':' in param_text:
-                                    param_name = param_text.split(':')[0].strip()
-                                else:
-                                    param_name = param_text.split(',')[0].strip() if ',' in param_text else param_text.strip()
-                        
-                        # Get line content
-                        line_content = lines[line_num - 1].strip() if line_num <= len(lines) else ""
-                        
-                        # Truncate very long lines
-                        if len(line_content) > 500:
-                            line_content = line_content[:200] + "..." + line_content[-200:]
-                        
-                        # Get context for parameters (like other findings)
-                        start_line = max(0, line_num - 5 - 1)
-                        end_line = min(len(lines), line_num + 5)
-                        context_lines_list = lines[start_line:end_line]
-                        context = '\n'.join(context_lines_list)
-                        
-                        # For very long lines (minified), truncate context
-                        if len(context) > 1000:
-                            # Show snippet around the match
-                            match_start = max(0, start_pos - 200)
-                            match_end = min(len(content), start_pos + len(full_match) + 200)
-                            context = content[match_start:match_end]
-                        
-                        param = {
-                            'type': label,
-                            'parameter': param_text[:200],
-                            'param_name': param_name[:100] if param_name else None,
-                            'param_value': param_value[:100] if param_value else None,
-                            'line': line_num,
-                            'full_match': full_match[:200],
-                            'line_content': line_content,
-                            'context': context,
-                            'context_start_line': start_line + 1,
-                            'context_end_line': end_line,
-                        }
-                        
-                        params.append(param)
-                    except Exception as e:
-                        # Skip problematic matches
-                        continue
-            except Exception as e:
-                # Skip problematic patterns
+                compiled.append((re.compile(pattern, re.MULTILINE | re.IGNORECASE), label, kind))
+            except Exception:
                 continue
-        
-        # Remove duplicates based on line and parameter
+
+        for cre, label, kind in compiled:
+            match_count = 0
+
+            for match in cre.finditer(content):
+                match_count += 1
+                if match_count > MAX_MATCHES_PER_PATTERN:
+                    break
+                if len(params) >= MAX_TOTAL_FINDINGS:
+                    break
+
+                try:
+                    pairs = None  # important: reset per match
+
+                    start_pos = match.start()
+                    line_num = 1 if not nl_positions else self._pos_to_line(nl_positions, start_pos)
+
+                    full_match = match.group(0) or ""
+                    line_content = lines[line_num - 1].strip() if 1 <= line_num <= len(lines) else ""
+
+                    if len(line_content) > 500:
+                        line_content = line_content[:200] + "..." + line_content[-200:]
+
+                    param_name = None
+                    param_value = None
+                    param_text = full_match
+
+                    g1 = match.group(1) if match.lastindex and match.lastindex >= 1 else None
+                    g2 = match.group(2) if match.lastindex and match.lastindex >= 2 else None
+                    payload = g1 or g2 or full_match
+
+                    text_has_query_markers = ("?" in full_match) or ("&" in full_match)
+                    payload_has_query_markers = isinstance(payload, str) and (
+                        payload.startswith("?") or payload.startswith("&") or "&" in payload
+                    )
+
+                    mode = kind
+                    if mode is None:
+                        if text_has_query_markers or payload_has_query_markers:
+                            mode = "query"
+                        elif "(" in full_match and ")" in full_match:
+                            mode = "func"
+                        elif "{" in full_match:
+                            mode = "object"
+                        else:
+                            mode = "generic"
+
+                    if mode == "query":
+                        pairs = self._parse_query_params(payload if isinstance(payload, str) else full_match)
+                        if pairs:
+                            for k, v in pairs:
+                                ptext = f"{k}={_clip(v, 50)}"
+                                params.append({
+                                    "type": label,
+                                    "parameter": _clip(ptext, 200),
+                                    "param_name": _clip(k, 100),
+                                    "param_value": _clip(v, 100),
+                                    "line": line_num,
+                                    "start_pos": start_pos,
+                                    "full_match": _clip(full_match, 400),
+                                    "line_content": line_content,
+                                    "context": "",
+                                    "context_start_line": None,
+                                    "context_end_line": None,
+                                })
+                        else:
+                            param_text = _clip(str(payload), 200)
+
+                    elif mode == "func":
+                        params_blob = g2 or g1 or payload or ""
+                        if not isinstance(params_blob, str):
+                            params_blob = str(params_blob)
+
+                        first = params_blob.split(",", 1)[0].strip()
+                        if "=" in first:
+                            param_name = first.split("=", 1)[0].strip()
+                            param_value = first.split("=", 1)[1].strip()
+                        elif ":" in first:
+                            param_name = first.split(":", 1)[0].strip()
+                        else:
+                            param_name = first or None
+
+                        param_text = params_blob.strip() or full_match
+
+                    elif mode == "object":
+                        blob = g1 or payload or ""
+                        if not isinstance(blob, str):
+                            blob = str(blob)
+                        blob = blob.strip()
+
+                        first = blob.split(",", 1)[0].strip()
+                        if ":" in first:
+                            param_name = first.split(":", 1)[0].strip()
+                        else:
+                            param_name = first or None
+
+                        param_text = blob or full_match
+
+                    else:
+                        blob = g1 or g2 or payload or ""
+                        if not isinstance(blob, str):
+                            blob = str(blob)
+                        blob = blob.strip()
+
+                        if "=" in blob:
+                            param_name = blob.split("=", 1)[0].strip()
+                            param_value = blob.split("=", 1)[1].strip()
+                        elif ":" in blob:
+                            param_name = blob.split(":", 1)[0].strip()
+                        else:
+                            param_name = (blob.split(",", 1)[0].strip() if blob else None)
+
+                        param_text = blob or full_match
+
+                    # Context
+                    is_minified_like = is_probably_minified or (len(lines) <= 3) or (len(line_content) > 300)
+                    if is_minified_like:
+                        context = self._snippet_context(content, start_pos, len(full_match), radius=250)
+                        context_start_line = None
+                        context_end_line = None
+                    else:
+                        start_line = max(0, line_num - 6)
+                        end_line = min(len(lines), line_num + 5)
+                        context = "\n".join(lines[start_line:end_line])
+
+                        if len(context) > 1000:
+                            context = self._snippet_context(content, start_pos, len(full_match), radius=250)
+                            context_start_line = None
+                            context_end_line = None
+                        else:
+                            context_start_line = start_line + 1
+                            context_end_line = end_line
+
+                    # Fill context for query pairs already appended
+                    if mode == "query" and pairs:
+                        for i in range(len(pairs)):
+                            params[-1 - i]["context"] = context
+                            params[-1 - i]["context_start_line"] = context_start_line
+                            params[-1 - i]["context_end_line"] = context_end_line
+                        continue
+
+                    params.append({
+                        "type": label,
+                        "parameter": _clip(param_text, 200),
+                        "param_name": _clip(param_name, 100),
+                        "param_value": _clip(param_value, 100),
+                        "line": line_num,
+                        "start_pos": start_pos,
+                        "full_match": _clip(full_match, 400),
+                        "line_content": line_content,
+                        "context": context,
+                        "context_start_line": context_start_line,
+                        "context_end_line": context_end_line,
+                    })
+
+                except Exception:
+                    continue
+
+            if len(params) >= MAX_TOTAL_FINDINGS:
+                break
+
+        # De-dup
         seen = set()
         unique_params = []
-        for param in params:
-            key = (param['line'], param['parameter'])
+        for p in params:
+            key = (p.get("line"), p.get("start_pos"), p.get("full_match"), p.get("param_name"), p.get("parameter"))
             if key not in seen:
                 seen.add(key)
-                unique_params.append(param)
-        
+                p.pop("start_pos", None)
+                unique_params.append(p)
+
         return unique_params
-    
+
     def extract_paths(self, content: str) -> List[Dict[str, Any]]:
         """Extract paths and directories"""
         paths = []
@@ -605,6 +866,7 @@ class JavaScriptAnalyzer:
                 url = url.replace('0.0.0.0', 'localhost')
             
             content = self.fetch_js_file(url)
+            print(f"\x1b[1;94m[>] Fetching URL: {url}, Content fetched: {'Yes' if content else 'No'}")
             if content is None:
                 # Try with 127.0.0.1 if localhost failed
                 if 'localhost' in url:
@@ -653,62 +915,88 @@ class JavaScriptAnalyzer:
             )
         
         file_size = len(content)
+        print(f"\x1b[1;93m[>] Analyzing content of size: {file_size} bytes")
         
         # Run all analyses with error handling
         try:
             api_keys = self.find_patterns(content, self.api_key_patterns)
+            print(f"\x1b[1;92m[>] Found {len(api_keys)} API keys")
         except Exception as e:
             errors.append(f"Error analyzing API keys: {str(e)}")
             api_keys = []
         
         try:
             credentials = self.find_patterns(content, self.credential_patterns)
+            print(f"\x1b[1;92m[>] Found {len(credentials)} credentials")
         except Exception as e:
             errors.append(f"Error analyzing credentials: {str(e)}")
             credentials = []
         
         try:
             emails = self.find_patterns(content, self.email_patterns)
+            print(f"\x1b[1;92m[>] Found {len(emails)} email addresses")
         except Exception as e:
             errors.append(f"Error analyzing emails: {str(e)}")
             emails = []
         
         try:
             comments = self.find_patterns(content, self.comment_patterns)
+            print(f"\x1b[1;92m[>] Found {len(comments)} interesting comments")
         except Exception as e:
             errors.append(f"Error analyzing comments: {str(e)}")
             comments = []
         
         try:
             xss_vulns = self.find_patterns(content, self.xss_patterns)
+            print(f"\x1b[1;92m[>] Found {len(xss_vulns)} XSS vulnerabilities")
         except Exception as e:
             errors.append(f"Error analyzing XSS vulnerabilities: {str(e)}")
             xss_vulns = []
         
         try:
             xss_funcs = self.find_patterns(content, self.xss_function_patterns)
+            print(f"\x1b[1;92m[>] Found {len(xss_funcs)} XSS-related functions")
         except Exception as e:
             errors.append(f"Error analyzing XSS functions: {str(e)}")
             xss_funcs = []
         
         try:
             api_endpoints = self.extract_api_endpoints(content)
+            print(f"\x1b[1;92m[>] Found {len(api_endpoints)} API endpoints")
         except Exception as e:
             errors.append(f"Error extracting API endpoints: {str(e)}")
             api_endpoints = []
-        
-        try:
+  
+        try:  
             parameters = self.extract_parameters(content)
+            print(f"\x1b[1;92m[>] Found {len(parameters)} parameters")
         except Exception as e:
             errors.append(f"Error extracting parameters: {str(e)}")
             parameters = []
-        
+       # parameters = []
         try:
+            
             paths = self.extract_paths(content)
+            print(f"\x1b[1;92m[>] Found {len(paths)} paths and directories\x1b[0m")
         except Exception as e:
             errors.append(f"Error extracting paths: {str(e)}")
             paths = []
         
+        # return AnalysisResult(
+        #     url=url,
+        #     api_keys=api_keys,
+        #     credentials=credentials,
+        #     emails=emails,
+        #     interesting_comments=comments,
+        #     xss_vulnerabilities=xss_vulns,
+        #     xss_functions=xss_funcs,
+        #     api_endpoints=api_endpoints,
+        #     parameters=parameters,
+        #     paths_directories=paths,
+        #     errors=errors,
+        #     file_size=file_size,
+        #     analysis_timestamp=datetime.now().isoformat()
+        # )
         return AnalysisResult(
             url=url,
             api_keys=api_keys,
@@ -724,4 +1012,5 @@ class JavaScriptAnalyzer:
             file_size=file_size,
             analysis_timestamp=datetime.now().isoformat()
         )
+
 

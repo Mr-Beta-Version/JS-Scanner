@@ -221,33 +221,65 @@ function displayFileCards(files) {
         const hasErrors = file.errors && file.errors.length > 0;
         
         card.innerHTML = `
-            <div class="file-card-header">
-                <div class="file-number">File ${file.file_id}</div>
-                <div class="file-status ${hasErrors ? 'error' : 'completed'}">
-                    ${hasErrors ? 'Error' : 'Completed'}
-                </div>
+        <div class="file-card-header">
+            <div class="file-number">File ${file.file_id}</div>
+            <div class="file-status ${hasErrors ? 'error' : 'completed'}">
+            ${hasErrors ? 'Error' : 'Completed'}
             </div>
-            <div class="file-url" title="${file.url}">${file.url}</div>
-            <div class="file-stats">
-                <div class="file-stat">
-                    <i class="fas fa-key"></i>
-                    <span>${file.api_keys?.length || 0} Keys</span>
-                </div>
-                <div class="file-stat">
-                    <i class="fas fa-lock"></i>
-                    <span>${file.credentials?.length || 0} Creds</span>
-                </div>
-                <div class="file-stat">
-                    <i class="fas fa-exclamation-triangle"></i>
-                    <span>${file.xss_vulnerabilities?.length || 0} XSS</span>
-                </div>
-                <div class="file-stat">
-                    <i class="fas fa-code-branch"></i>
-                    <span>${file.api_endpoints?.length || 0} Endpoints</span>
-                </div>
+        </div>
+
+        <div class="file-url" title="${file.url}">${file.url}</div>
+
+        <div class="file-stats">
+            <div class="file-stat">
+            <i class="fas fa-key"></i>
+            <span>${file.api_keys?.length || 0} Keys</span>
             </div>
-            ${hasErrors ? `<div style="margin-top: 10px; color: var(--danger); font-size: 0.85rem;">${file.errors[0]}</div>` : ''}
+
+            <div class="file-stat">
+            <i class="fas fa-user-lock"></i>
+            <span>${file.credentials?.length || 0} Creds</span>
+            </div>
+
+            <div class="file-stat">
+            <i class="fas fa-envelope"></i>
+            <span>${file.emails?.length || 0} Emails</span>
+            </div>
+
+            <div class="file-stat">
+            <i class="fas fa-exclamation-triangle"></i>
+            <span>${file.xss_vulnerabilities?.length || 0} XSS Vulns</span>
+            </div>
+
+            <div class="file-stat">
+            <i class="fas fa-bug"></i>
+            <span>${file.xss_functions?.length || 0} XSS Funcs</span>
+            </div>
+
+            <div class="file-stat">
+            <i class="fas fa-code-branch"></i>
+            <span>${file.api_endpoints?.length || 0} Endpoints</span>
+            </div>
+
+            <div class="file-stat">
+            <i class="fas fa-sliders-h"></i>
+            <span>${file.parameters?.length || 0} Params</span>
+            </div>
+
+            <div class="file-stat">
+            <i class="fas fa-folder-open"></i>
+            <span>${file.paths_directories?.length || 0} Paths</span>
+            </div>
+
+            <div class="file-stat">
+            <i class="fas fa-comments"></i>
+            <span>${file.interesting_comments?.length || 0} Comments</span>
+            </div>
+        </div>
+
+        ${hasErrors ? `<div style="margin-top: 10px; color: var(--danger); font-size: 0.85rem;">${file.errors[0]}</div>` : ''}
         `;
+
         
         grid.appendChild(card);
     });
@@ -293,8 +325,17 @@ function updateStats(data) {
     document.getElementById('stat-api-keys').textContent = data.api_keys?.length || 0;
     document.getElementById('stat-credentials').textContent = data.credentials?.length || 0;
     document.getElementById('stat-emails').textContent = data.emails?.length || 0;
-    document.getElementById('stat-xss').textContent = (data.xss_vulnerabilities?.length || 0) + (data.xss_functions?.length || 0);
+
+    document.getElementById('stat-xss').textContent = data.xss_vulnerabilities?.length || 0;
+
+    document.getElementById('stat-xss-functions').textContent = (data.xss_functions?.length || 0);
+
     document.getElementById('stat-endpoints').textContent = data.api_endpoints?.length || 0;
+
+    // 🔧 MISSING BEFORE
+    document.getElementById('stat-parameters').textContent = data.parameters?.length || 0;
+    document.getElementById('stat-paths').textContent = data.paths_directories?.length || 0;
+    document.getElementById('stat-comments').textContent = data.interesting_comments?.length || 0;
 }
 
 function displayFindings(data) {
@@ -303,15 +344,24 @@ function displayFindings(data) {
     
     const sections = [
         { key: 'api_keys', title: 'API Keys', icon: 'fa-key', color: 'warning' },
-        { key: 'credentials', title: 'Credentials', icon: 'fa-lock', color: 'danger' },
+
+        { key: 'credentials', title: 'Credentials', icon: 'fa-user-lock', color: 'danger' },
+
         { key: 'emails', title: 'Email Addresses', icon: 'fa-envelope', color: 'primary' },
+
         { key: 'xss_vulnerabilities', title: 'XSS Vulnerabilities', icon: 'fa-exclamation-triangle', color: 'danger' },
-        { key: 'xss_functions', title: 'XSS Functions', icon: 'fa-code', color: 'danger' },
+
+        { key: 'xss_functions', title: 'XSS Functions', icon: 'fa-bug', color: 'danger' },
+
         { key: 'api_endpoints', title: 'API Endpoints', icon: 'fa-code-branch', color: 'success' },
-        { key: 'parameters', title: 'Parameters', icon: 'fa-list', color: 'primary' },
-        { key: 'paths_directories', title: 'Paths & Directories', icon: 'fa-folder', color: 'primary' },
-        { key: 'interesting_comments', title: 'Interesting Comments', icon: 'fa-comment', color: 'warning' },
-    ];
+
+        { key: 'parameters', title: 'Parameters', icon: 'fa-sliders-h', color: 'primary' },
+
+        { key: 'paths_directories', title: 'Paths & Directories', icon: 'fa-folder-open', color: 'primary' },
+
+        { key: 'interesting_comments', title: 'Interesting Comments', icon: 'fa-comments', color: 'warning' },
+        ];
+
     
     sections.forEach(section => {
         const items = data[section.key] || [];
@@ -366,12 +416,20 @@ function createFindingItem(item, section) {
         type.textContent = item.type || section.title;
     }
     
+    // const line = document.createElement('div');
+    // line.className = 'finding-line';
+    // line.textContent = `Line ${item.line}`;
+    
+    left.appendChild(type);
+    // left.appendChild(line);
+    
+        // add line ONLY if it exists
+    if (typeof item === 'object' && item.line) {
     const line = document.createElement('div');
     line.className = 'finding-line';
     line.textContent = `Line ${item.line}`;
-    
-    left.appendChild(type);
     left.appendChild(line);
+    }
     
     const right = document.createElement('div');
     if (item.severity) {
@@ -401,15 +459,32 @@ function createFindingItem(item, section) {
             div.appendChild(paramInfo);
         }
     }
-    
+        
+    // Match content (supports object OR string items)
+    const asText = (typeof item === 'string') ? item : null;
+
     // Match content
-    if (item.match || item.parameter) {
-        const match = document.createElement('div');
-        match.className = 'finding-match';
-        match.textContent = item.match || item.parameter || item.full_match;
-        div.appendChild(match);
+    // Content (supports string OR object)
+    const text =
+    (typeof item === 'string' ? item : null) ||
+    item.match ||
+    item.parameter ||
+    item.full_match ||
+    item.path ||
+    item.directory ||
+    item.comment ||
+    item.text ||
+    item.value;
+
+    if (text) {
+    const match = document.createElement('div');
+    match.className = 'finding-match';
+    match.textContent = text;
+    div.appendChild(match);
     }
-    
+
+
+
     // Line content
     if (item.line_content) {
         const lineContent = document.createElement('div');
@@ -419,6 +494,9 @@ function createFindingItem(item, section) {
         lineContent.textContent = item.line_content;
         div.appendChild(lineContent);
     }
+
+
+
     
     // Show code button - now available for parameters too
     if (item.context || item.line_content) {
